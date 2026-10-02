@@ -8,19 +8,266 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel, ConfigDict, Field
 from presidio_analyzer import AnalyzerEngine, AnalyzerRequest, BatchAnalyzerEngine
 from presidio_anonymizer import AnonymizerEngine, DeanonymizeEngine
 from presidio_anonymizer.entities import InvalidParamError
 from presidio_anonymizer.services.app_entities_convertor import AppEntitiesConvertor
-from anonymizers import register_anonymizers
 
-from analyzers import LANGUAGE, SPACY_MODEL, TRANSFORMERS_MODEL, create_analyzer_engine
+from anonymizers import register_anonymizers
+from analyzers import (
+    LANGUAGE,
+    SPACY_MODEL,
+    TRANSFORMERS_MODEL,
+    create_analyzer_engine,
+)
 
 DEFAULT_PORT = 3000
 DEFAULT_BATCH_SIZE = 500
 DEFAULT_N_PROCESS = 1
 
 logger = logging.getLogger("presidio-api")
+
+
+class OperatorRequest(BaseModel):
+    """Configuration for one Presidio anonymization operator."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = Field(
+        ...,
+        description="Registered Presidio operator name.",
+        examples=[
+            "replace",
+            "fake_phone_number",
+            "fake_rut",
+            "shift_date",
+        ],
+    )
+
+    new_value: str | None = Field(
+        default=None,
+        description="Replacement value when using the replace operator.",
+        examples=["<PERSONA>"],
+    )
+
+    days_shift: int | None = Field(
+        default=None,
+        description=(
+            "Temporal shift in days for shift_date. "
+            "Use the same value for all dates in a document to preserve chronology."
+        ),
+        examples=[90],
+    )
+
+    reference_date: str | None = Field(
+        default=None,
+        description=(
+            "ISO-8601 date used as a reference for natural language dates, "
+            "for example mañana or ayer."
+        ),
+        examples=["2026-10-02T00:00:00"],
+    )
+
+
+class AnalyzeRequestBody(BaseModel):
+    """Request body for POST /analyze."""
+
+    text: str | list[str] = Field(
+        ...,
+        description="One text string or a list of text strings.",
+        examples=[
+            "Fabián Villena trabaja en la Universidad Católica y vive en Santiago."
+        ],
+    )
+
+    language: str = Field(
+        default=LANGUAGE,
+        description="Text language.",
+        examples=[LANGUAGE],
+    )
+
+    entities: list[str] | None = Field(
+        default=None,
+        description="Optional entity types to detect.",
+        examples=[
+            [
+                "PERSON",
+                "ORGANIZATION",
+                "LOCATION",
+                "RUT",
+                "PHONE_NUMBER",
+                "DATE_TIME",
+            ]
+        ],
+    )
+
+    score_threshold: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Optional minimum score for recognizer results.",
+        examples=[0.5],
+    )
+
+    context: list[str] | None = Field(
+        default=None,
+        description="Optional context words for recognizers.",
+    )
+
+    allow_list: list[str] | None = Field(
+        default=None,
+        description="Optional values that should not be detected.",
+    )
+
+
+class AnonymizeRequestBody(BaseModel):
+    """Request body for POST /anonymize."""
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        description="Original text containing the entities to anonymize.",
+        examples=[
+            "Fabián Villena trabaja en la Universidad Católica y su teléfono es 954687598."
+        ],
+    )
+
+    analyzer_results: list[dict[str, Any]] = Field(
+        ...,
+        description="Results returned by POST /analyze.",
+        examples=[
+            [
+                {
+                    "entity_type": "PERSON",
+                    "start": 0,
+                    "end": 14,
+                    "score": 0.98,
+                },
+                {
+                    "entity_type": "PHONE_NUMBER",
+                    "start": 69,
+                    "end": 78,
+                    "score": 0.9,
+                },
+            ]
+        ],
+    )
+
+    anonymizers: dict[str, OperatorRequest] | None = Field(
+        default=None,
+        description="Operator configuration per entity type.",
+        examples=[
+            {
+                "PERSON": {
+                    "type": "llm_replace",
+                },
+                "PHONE_NUMBER": {
+                    "type": "fake_phone_number",
+                },
+                "RUT": {
+                    "type": "fake_rut",
+                },
+                "DATE_TIME": {
+                    "type": "shift_date",
+                },
+            }
+        ],
+    )
+
+
+class DeanonymizeRequestBody(BaseModel):
+    """Request body for POST /deanonymize."""
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        description="Text generated by Presidio encrypt anonymization.",
+    )
+
+    entities: list[dict[str, Any]] = Field(
+        ...,
+        description="Items returned by the Presidio anonymization response.",
+    )
+
+    deanonymizers: dict[str, OperatorRequest] | None = Field(
+        default=None,
+        description="Deanonymization operator configuration.",
+    )
+
+
+class AnalyzeAndAnonymizeRequestBody(BaseModel):
+    """Request body for POST /analyze+anonymize."""
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        description="Single text to analyze and anonymize.",
+        examples=[
+            (
+                "Fabián Villena (16589785-6) trabaja en la Universidad Católica "
+                "y vive en Santiago. Su teléfono es 954687598. "
+                "Tiene una cita 26 de noviembre a las 10:00."
+            )
+        ],
+    )
+
+    language: str = Field(
+        default=LANGUAGE,
+        description="Text language.",
+        examples=[LANGUAGE],
+    )
+
+    entities: list[str] | None = Field(
+        default=None,
+        description="Optional entity types to analyze.",
+        examples=[
+            [
+                "PERSON",
+                "ORGANIZATION",
+                "LOCATION",
+                "RUT",
+                "PHONE_NUMBER",
+                "DATE_TIME",
+            ]
+        ],
+    )
+
+    score_threshold: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Optional minimum score for recognizer results.",
+        examples=[0.5],
+    )
+
+    context: list[str] | None = Field(
+        default=None,
+        description="Optional context words for recognizers.",
+    )
+
+    allow_list: list[str] | None = Field(
+        default=None,
+        description="Optional values that should not be detected.",
+    )
+
+    anonymizers: dict[str, OperatorRequest] | None = Field(
+        default=None,
+        description="Operator configuration per entity type.",
+        examples=[
+            {
+                "RUT": {
+                    "type": "fake_rut",
+                },
+                "PHONE_NUMBER": {
+                    "type": "fake_phone_number",
+                },
+                "DATE_TIME": {
+                    "type": "shift_date",
+                },
+            }
+        ],
+    )
 
 
 def remove_internal_attributes(results: list[Any]) -> None:
@@ -47,6 +294,7 @@ async def lifespan(app: FastAPI):
 
     app.state.analyzer_engine = analyzer_engine
     app.state.batch_engine = BatchAnalyzerEngine(analyzer_engine)
+
     anonymizer_engine = AnonymizerEngine()
     register_anonymizers(anonymizer_engine)
 
@@ -86,11 +334,18 @@ def health() -> str:
     return "Presidio Analyzer and Anonymizer service is up"
 
 
-@app.post("/analyze")
-async def analyze(request: Request) -> JSONResponse:
+@app.post(
+    "/analyze",
+    summary="Analyze PII",
+    description="Detect PII entities in one text or a list of texts.",
+)
+async def analyze(
+    payload: AnalyzeRequestBody,
+    request: Request,
+) -> JSONResponse:
     """Analyze one text or a list of texts."""
     try:
-        content = await request.json()
+        content = payload.model_dump(exclude_none=True)
         analyzer_request = AnalyzerRequest(content)
 
         if not analyzer_request.text:
@@ -176,23 +431,18 @@ async def analyze(request: Request) -> JSONResponse:
         ) from exc
 
 
-@app.post("/anonymize")
-async def anonymize(request: Request) -> JSONResponse:
+@app.post(
+    "/anonymize",
+    summary="Anonymize PII",
+    description="Anonymize text using results returned by POST /analyze.",
+)
+async def anonymize(
+    payload: AnonymizeRequestBody,
+    request: Request,
+) -> JSONResponse:
     """Anonymize text with results returned by POST /analyze."""
     try:
-        content = await request.json()
-
-        if not content:
-            raise HTTPException(status_code=400, detail="Invalid request JSON")
-
-        if "text" not in content:
-            raise HTTPException(status_code=400, detail="No text provided")
-
-        if "analyzer_results" not in content:
-            raise HTTPException(
-                status_code=400,
-                detail="No analyzer_results provided",
-            )
+        content = payload.model_dump(exclude_none=True)
 
         operators = AppEntitiesConvertor.operators_config_from_json(
             content.get("anonymizers")
@@ -235,17 +485,18 @@ async def anonymize(request: Request) -> JSONResponse:
         ) from exc
 
 
-@app.post("/deanonymize")
-async def deanonymize(request: Request) -> JSONResponse:
+@app.post(
+    "/deanonymize",
+    summary="Deanonymize encrypted content",
+    description="Deanonymize data created with Presidio encrypt anonymization.",
+)
+async def deanonymize(
+    payload: DeanonymizeRequestBody,
+    request: Request,
+) -> JSONResponse:
     """Deanonymize data created with Presidio's encrypt operator."""
     try:
-        content = await request.json()
-
-        if not content:
-            raise HTTPException(status_code=400, detail="Invalid request JSON")
-
-        if "text" not in content:
-            raise HTTPException(status_code=400, detail="No text provided")
+        content = payload.model_dump(exclude_none=True)
 
         entities = AppEntitiesConvertor.deanonymize_entities_from_json(content)
 
@@ -280,38 +531,30 @@ async def deanonymize(request: Request) -> JSONResponse:
         ) from exc
 
 
-@app.post("/analyze+anonymize")
-async def analyze_and_anonymize(request: Request) -> JSONResponse:
-    """
-    Analyze and anonymize a single text in one request.
-
-    Example:
-    {
-      "text": "Fabián Villena trabaja en Microsoft Chile.",
-      "language": "es",
-      "anonymizers": {
-        "PERSON": {
-          "type": "replace",
-          "new_value": "<PERSONA>"
-        },
-        "ORGANIZATION": {
-          "type": "replace",
-          "new_value": "<ORGANIZACION>"
-        },
-        "LOCATION": {
-          "type": "replace",
-          "new_value": "<UBICACION>"
-        },
-        "DEFAULT": {
-          "type": "replace",
-          "new_value": "<PII>"
-        }
-      }
-    }
-    """
+@app.post(
+    "/analyze+anonymize",
+    summary="Analyze and anonymize",
+    description=(
+        "Detect PII entities and anonymize them in one request. "
+        "Use the anonymizers object to configure a Presidio operator "
+        "for each entity type."
+    ),
+)
+async def analyze_and_anonymize(
+    payload: AnalyzeAndAnonymizeRequestBody,
+    request: Request,
+) -> JSONResponse:
+    """Analyze and anonymize a single text in one request."""
     try:
-        content = await request.json()
-        analyzer_request = AnalyzerRequest(content)
+        content = payload.model_dump(exclude_none=True)
+
+        analyzer_content = {
+            key: value
+            for key, value in content.items()
+            if key != "anonymizers"
+        }
+
+        analyzer_request = AnalyzerRequest(analyzer_content)
 
         if not analyzer_request.text:
             raise HTTPException(
@@ -323,7 +566,7 @@ async def analyze_and_anonymize(request: Request) -> JSONResponse:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "The analyze-and-anonymize endpoint accepts "
+                    "The analyze+anonymize endpoint accepts "
                     "only one text string"
                 ),
             )
@@ -394,7 +637,7 @@ async def analyze_and_anonymize(request: Request) -> JSONResponse:
         ) from exc
 
     except TypeError as exc:
-        logger.exception("Invalid /analyze-and-anonymize request")
+        logger.exception("Invalid /analyze+anonymize request")
         raise HTTPException(
             status_code=400,
             detail=f"Invalid request: {exc}",
@@ -406,6 +649,7 @@ async def analyze_and_anonymize(request: Request) -> JSONResponse:
             status_code=500,
             detail=f"Analyze and anonymize operation failed: {exc}",
         ) from exc
+
 
 @app.get("/recognizers")
 def recognizers(
