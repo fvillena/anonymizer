@@ -6,7 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from presidio_analyzer import AnalyzerEngine, AnalyzerRequest, BatchAnalyzerEngine
@@ -81,12 +81,6 @@ class AnalyzeRequestBody(BaseModel):
         ],
     )
 
-    language: str = Field(
-        default=LANGUAGE,
-        description="Text language.",
-        examples=[LANGUAGE],
-    )
-
     entities: list[str] | None = Field(
         default=None,
         description="Optional entity types to detect.",
@@ -159,9 +153,6 @@ class AnonymizeRequestBody(BaseModel):
         description="Operator configuration per entity type.",
         examples=[
             {
-                "PERSON": {
-                    "type": "llm_replace",
-                },
                 "PHONE_NUMBER": {
                     "type": "fake_phone_number",
                 },
@@ -169,7 +160,7 @@ class AnonymizeRequestBody(BaseModel):
                     "type": "fake_rut",
                 },
                 "DATE_TIME": {
-                    "type": "shift_date",
+                    "type": "shift_date"
                 },
             }
         ],
@@ -210,12 +201,6 @@ class AnalyzeAndAnonymizeRequestBody(BaseModel):
                 "Tiene una cita 26 de noviembre a las 10:00."
             )
         ],
-    )
-
-    language: str = Field(
-        default=LANGUAGE,
-        description="Text language.",
-        examples=[LANGUAGE],
     )
 
     entities: list[str] | None = Field(
@@ -263,7 +248,7 @@ class AnalyzeAndAnonymizeRequestBody(BaseModel):
                     "type": "fake_phone_number",
                 },
                 "DATE_TIME": {
-                    "type": "shift_date",
+                    "type": "shift_date"
                 },
             }
         ],
@@ -346,16 +331,12 @@ async def analyze(
     """Analyze one text or a list of texts."""
     try:
         content = payload.model_dump(exclude_none=True)
+        content["language"] = LANGUAGE
+
         analyzer_request = AnalyzerRequest(content)
 
         if not analyzer_request.text:
             raise HTTPException(status_code=400, detail="No text provided")
-
-        if analyzer_request.language != LANGUAGE:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Only '{LANGUAGE}' is supported",
-            )
 
         analyzer_engine: AnalyzerEngine = request.app.state.analyzer_engine
         batch_engine: BatchAnalyzerEngine = request.app.state.batch_engine
@@ -381,7 +362,7 @@ async def analyze(
 
         iterator = batch_engine.analyze_iterator(
             texts=texts,
-            language=analyzer_request.language,
+            language=LANGUAGE,
             batch_size=batch_size,
             n_process=n_process,
             entities=analyzer_request.entities,
@@ -536,8 +517,7 @@ async def deanonymize(
     summary="Analyze and anonymize",
     description=(
         "Detect PII entities and anonymize them in one request. "
-        "Use the anonymizers object to configure a Presidio operator "
-        "for each entity type."
+        "Spanish is always used as the analysis language."
     ),
 )
 async def analyze_and_anonymize(
@@ -553,6 +533,7 @@ async def analyze_and_anonymize(
             for key, value in content.items()
             if key != "anonymizers"
         }
+        analyzer_content["language"] = LANGUAGE
 
         analyzer_request = AnalyzerRequest(analyzer_content)
 
@@ -571,18 +552,12 @@ async def analyze_and_anonymize(
                 ),
             )
 
-        if analyzer_request.language != LANGUAGE:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Only '{LANGUAGE}' is supported",
-            )
-
         analyzer_engine: AnalyzerEngine = request.app.state.analyzer_engine
         anonymizer: AnonymizerEngine = request.app.state.anonymizer_engine
 
         analyzer_results = analyzer_engine.analyze(
             text=analyzer_request.text,
-            language=analyzer_request.language,
+            language=LANGUAGE,
             entities=analyzer_request.entities,
             score_threshold=analyzer_request.score_threshold,
             correlation_id=analyzer_request.correlation_id,
@@ -652,17 +627,14 @@ async def analyze_and_anonymize(
 
 
 @app.get("/recognizers")
-def recognizers(
-    request: Request,
-    language: str = Query(default=LANGUAGE),
-) -> list[str]:
+def recognizers(request: Request) -> list[str]:
     """Return recognizers available for Spanish."""
     try:
         analyzer_engine: AnalyzerEngine = request.app.state.analyzer_engine
 
         return [
             recognizer.name
-            for recognizer in analyzer_engine.get_recognizers(language)
+            for recognizer in analyzer_engine.get_recognizers(LANGUAGE)
         ]
 
     except Exception as exc:
@@ -671,15 +643,12 @@ def recognizers(
 
 
 @app.get("/supportedentities")
-def supported_entities(
-    request: Request,
-    language: str = Query(default=LANGUAGE),
-) -> list[str]:
+def supported_entities(request: Request) -> list[str]:
     """Return entity types supported by the current NLP engine."""
     try:
         analyzer_engine: AnalyzerEngine = request.app.state.analyzer_engine
 
-        return analyzer_engine.get_supported_entities(language)
+        return analyzer_engine.get_supported_entities(LANGUAGE)
 
     except Exception as exc:
         logger.exception("Could not retrieve supported entities")
